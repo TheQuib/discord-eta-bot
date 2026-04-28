@@ -73,11 +73,3 @@ jobs:
             ghcr.io/thequib/discord-eta-bot:latest
             ghcr.io/thequib/discord-eta-bot:${{ env.VERSION }}
             ghcr.io/thequib/discord-eta-bot:${{ github.sha }}
-
-      - name: Create Git tag
-        if: steps.tag_exists.outputs.found != 'true'
-        run: |
-          git config user.name "GitHub Actions"
-          git config user.email "actions@github.com"
-          git tag -a v${{ env.VERSION }} -m "Release version ${{ env.VERSION }}"
-          git push origin v${{ env.VERSION }}
