@@ -1,8 +1,11 @@
 .git/
 .github/
-database/
+database/*.db
 venv/
 .env*
+__pycache__/
+*.pyc
+*.log
 CODE_OF_CONDUCT.md
 CONTRIBUTING.md
 UPDATES.md

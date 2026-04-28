@@ -1,15 +1,9 @@
 services:
-  discord-bot:
+  discord-eta-bot:
+    container_name: discord-eta-bot
     build: .
-    image: python-discord-bot-template
+    image: discord-eta-bot:latest
     env_file:
       - .env
     volumes:
       - ./database:/bot/database
-      - ./discord.log:/bot/discord.log
-
-    # Alternatively you can set the environment variables as such:
-    # /!\ The token shouldn't be written here, as this file is not ignored from Git /!\
-    # environment:
-    #   - PREFIX=YOUR_BOT_PREFIX_HERE
-    #   - INVITE_LINK=YOUR_BOT_INVITE_LINK_HERE
