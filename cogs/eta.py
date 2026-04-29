@@ -35,20 +35,25 @@ COLOR_STOPPED = 0x7F8C8D
 
 
 class ETAStopView(discord.ui.View):
-    """View with a single 'Stop' button. Anyone in the channel can press it."""
+    """Stop button — only shown when the session was started with show_stop_button=True."""
 
     def __init__(self, session: "ETASession"):
         super().__init__(timeout=None)
         self.session = session
 
-    @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, emoji="⏹️")
+    @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, emoji="\u23f9\ufe0f")
     async def stop_button(
         self,
         interaction: discord.Interaction,
         button: discord.ui.Button,
     ) -> None:
-        # Ack the click first so Discord doesn't show "interaction failed"
-        # while we edit the message.
+        # Require Manage Messages to press the button.
+        if not interaction.channel.permissions_for(interaction.user).manage_messages:
+            await interaction.response.send_message(
+                "You need the **Manage Messages** permission to stop this session.",
+                ephemeral=True,
+            )
+            return
         try:
             await interaction.response.defer()
         except discord.InteractionResponded:
@@ -68,6 +73,7 @@ class ETASession:
         mode: str,
         interval_minutes: int,
         requested_by: discord.abc.User,
+        show_stop_button: bool = False,
     ) -> None:
         self.cog = cog
         self.message = message
@@ -77,11 +83,23 @@ class ETASession:
         self.interval_minutes = interval_minutes
         self.interval_seconds = interval_minutes * 60
         self.requested_by = requested_by
+        self.show_stop_button = show_stop_button
         self.task: Optional[asyncio.Task] = None
         self._stopped = False
+        self._refresh_count = 0
 
     def start(self) -> None:
         self.task = asyncio.create_task(self._run())
+
+    def _make_view(self, *, disabled: bool = False) -> Optional[ETAStopView]:
+        """Return a view with the Stop button, or None if button is disabled."""
+        if not self.show_stop_button:
+            return None
+        view = ETAStopView(self)
+        if disabled:
+            for child in view.children:
+                child.disabled = True
+        return view
 
     async def _run(self) -> None:
         try:
@@ -102,19 +120,52 @@ class ETASession:
             await self.stop(reason=f"Stopped: loop crashed ({type(e).__name__})")
 
     async def _tick(self) -> None:
+        self._refresh_count += 1
+        log_prefix = (
+            f"[ETA #{self._refresh_count}] "
+            f"{self.origin!r} -> {self.destination!r} ({self.mode})"
+        )
+
         try:
             data = await self.cog.fetch_eta(self.origin, self.destination, self.mode)
-            embed = self._build_embed(data)
         except Exception as e:
+            self.cog.bot.logger.warning(f"{log_prefix} | fetch failed: {e}")
             await self._render_error(str(e))
             return
 
+        # Log the result before building the embed.
+        rows = data.get("rows") or []
+        element = rows[0]["elements"][0] if rows and rows[0].get("elements") else {}
+        if element.get("status") == "OK":
+            dur = element.get("duration_in_traffic") or element.get("duration") or {}
+            dist = element.get("distance") or {}
+            dur_secs = dur.get("value")
+            arrival_str = ""
+            if dur_secs:
+                arrival = datetime.now(timezone.utc) + timedelta(seconds=dur_secs)
+                arrival_str = f" | arrive ~<t:{int(arrival.timestamp())}:t>"
+            self.cog.bot.logger.info(
+                f"{log_prefix} | {dur.get('text', '?')} | {dist.get('text', '?')}{arrival_str}"
+            )
+        else:
+            self.cog.bot.logger.warning(
+                f"{log_prefix} | status={element.get('status', data.get('status', 'UNKNOWN'))}"
+            )
+
+        embed = self._build_embed(data)
+        view = self._make_view()
         try:
-            await self.message.edit(embed=embed, view=ETAStopView(self))
+            await self.message.edit(embed=embed, view=view)
         except discord.NotFound:
+            self.cog.bot.logger.info(
+                f"{log_prefix} | message deleted — stopping session"
+            )
+            # Mark stopped directly; no point trying to edit the (deleted) message.
             self._stopped = True
+            if self.task and not self.task.done():
+                self.task.cancel()
         except discord.HTTPException as e:
-            self.cog.bot.logger.warning(f"Failed to edit ETA message: {e}")
+            self.cog.bot.logger.warning(f"{log_prefix} | failed to edit message: {e}")
 
     def _build_embed(self, data: dict) -> discord.Embed:
         rows = data.get("rows") or []
@@ -185,7 +236,7 @@ class ETASession:
         embed.add_field(name="From", value=self.origin, inline=True)
         embed.add_field(name="To", value=self.destination, inline=True)
         try:
-            await self.message.edit(embed=embed, view=ETAStopView(self))
+            await self.message.edit(embed=embed, view=self._make_view())
         except Exception:
             pass
 
@@ -199,18 +250,14 @@ class ETASession:
         # Rebuild embed without live fields, then disable the button.
         embed = self.message.embeds[0] if self.message.embeds else discord.Embed(title="Stopped")
         embed.color = COLOR_STOPPED
-        # Strip fields that become misleading once stopped.
         stale_fields = {"Next refresh", "Would arrive by"}
         kept = [(f.name, f.value, f.inline) for f in embed.fields if f.name not in stale_fields]
         embed.clear_fields()
         for name, value, inline in kept:
             embed.add_field(name=name, value=value, inline=inline)
         embed.set_footer(text=reason)
-        view = ETAStopView(self)
-        for child in view.children:
-            child.disabled = True
         try:
-            await self.message.edit(embed=embed, view=view)
+            await self.message.edit(embed=embed, view=self._make_view(disabled=True))
         except Exception:
             pass
 
@@ -226,7 +273,6 @@ class ETA(commands.Cog, name="eta"):
         self._session = aiohttp.ClientSession()
 
     async def cog_unload(self) -> None:
-        # Cancel any running sessions and close the HTTP client.
         for s in list(self._sessions):
             await s.stop(reason="Bot reloaded")
         if self._session and not self._session.closed:
@@ -247,7 +293,6 @@ class ETA(commands.Cog, name="eta"):
             "key": self.api_key,
             "units": "imperial",
         }
-        # departure_time=now unlocks live traffic for driving requests.
         if mode == "driving":
             params["departure_time"] = "now"
 
@@ -268,10 +313,11 @@ class ETA(commands.Cog, name="eta"):
         description="Post a live ETA between two locations that updates on an interval.",
     )
     @app_commands.describe(
-        from_location="Origin: address, place name, or 'lat,lng'.",
-        to_location="Destination: address, place name, or 'lat,lng'.",
+        from_location="Origin: address, place name, or \'lat,lng\'.",
+        to_location="Destination: address, place name, or \'lat,lng\'.",
         time_to_update="How often to refresh, in minutes (1-30). Default 5.",
         mode="Travel mode. Default: driving.",
+        show_stop_button="Add a Stop button to the embed (requires Manage Messages to use).",
     )
     @app_commands.choices(mode=MODE_CHOICES)
     async def traveltime(
@@ -281,6 +327,7 @@ class ETA(commands.Cog, name="eta"):
         to_location: str,
         time_to_update: app_commands.Range[int, MIN_INTERVAL_MINUTES, MAX_INTERVAL_MINUTES] = 5,
         mode: Optional[app_commands.Choice[str]] = None,
+        show_stop_button: bool = False,
     ) -> None:
         mode_value = mode.value if mode else "driving"
 
@@ -291,9 +338,8 @@ class ETA(commands.Cog, name="eta"):
             )
             return
 
-        # Send a placeholder we can edit on each tick.
         placeholder = discord.Embed(
-            title="Fetching ETA…",
+            title="Fetching ETA\u2026",
             description=f"From **{from_location}** to **{to_location}** ({mode_value})",
             color=COLOR_PENDING,
         )
@@ -308,20 +354,15 @@ class ETA(commands.Cog, name="eta"):
             mode=mode_value,
             interval_minutes=time_to_update,
             requested_by=interaction.user,
+            show_stop_button=show_stop_button,
         )
         self._sessions.append(session)
-
-        # Attach the Stop button immediately so users can cancel even before
-        # the first tick lands.
-        try:
-            await message.edit(view=ETAStopView(session))
-        except Exception:
-            pass
-
         session.start()
+
         self.bot.logger.info(
             f"Started /traveltime: {from_location!r} -> {to_location!r} "
             f"every {time_to_update}m via {mode_value} "
+            f"stop_button={show_stop_button} "
             f"for {interaction.user} (ID: {interaction.user.id})"
         )
 
