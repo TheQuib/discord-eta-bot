@@ -86,7 +86,7 @@ class DiscordBot(commands.Bot):
 
     @tasks.loop(minutes=1.0)
     async def status_task(self) -> None:
-        statuses = ["with /traveltime", "tracking ETAs", "with maps"]
+        statuses = ["/traveltime magic", "tracking ETAs", "currently mapping"]
         await self.change_presence(activity=discord.Game(random.choice(statuses)))
 
     @status_task.before_loop
@@ -103,12 +103,9 @@ class DiscordBot(commands.Bot):
         self.status_task.start()
 
     async def on_message(self, message: discord.Message) -> None:
-        self.logger.info(f"MSG [{message.guild}/{message.channel}] {message.author}: {repr(message.content[:60])}")
         if message.author == self.user or message.author.bot:
             return
-        ctx = await self.get_context(message)
-        self.logger.info(f"CTX command={ctx.command} prefix={repr(ctx.prefix)} invoked_with={repr(ctx.invoked_with)}")
-        await self.invoke(ctx)
+        await self.process_commands(message)
 
     async def on_command_completion(self, context: Context) -> None:
         full_command_name = context.command.qualified_name
