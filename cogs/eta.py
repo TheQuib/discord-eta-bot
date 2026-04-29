@@ -99,7 +99,7 @@ class ETASession:
             pass
         except Exception as e:
             self.cog.bot.logger.exception(f"ETA loop crashed: {e}")
-            await self._render_error(f"Loop crashed: {e}")
+            await self.stop(reason=f"Stopped: loop crashed ({type(e).__name__})")
 
     async def _tick(self) -> None:
         try:
@@ -196,9 +196,15 @@ class ETASession:
         if self.task and not self.task.done():
             self.task.cancel()
 
-        # Disable the button and add the reason to the footer.
+        # Rebuild embed without live fields, then disable the button.
         embed = self.message.embeds[0] if self.message.embeds else discord.Embed(title="Stopped")
         embed.color = COLOR_STOPPED
+        # Strip fields that become misleading once stopped.
+        stale_fields = {"Next refresh", "Would arrive by"}
+        kept = [(f.name, f.value, f.inline) for f in embed.fields if f.name not in stale_fields]
+        embed.clear_fields()
+        for name, value, inline in kept:
+            embed.add_field(name=name, value=value, inline=inline)
         embed.set_footer(text=reason)
         view = ETAStopView(self)
         for child in view.children:
