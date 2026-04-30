@@ -199,4 +199,3 @@ class DiscordBot(commands.Bot):
 
 bot = DiscordBot()
 bot.run(os.getenv("TOKEN"))
-getenv("TOKEN"))

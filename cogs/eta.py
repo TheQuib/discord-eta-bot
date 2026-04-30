@@ -36,13 +36,13 @@ COLOR_STOPPED = 0x7F8C8D
 
 
 class ETAStopView(discord.ui.View):
-    """Stop button — only shown when the session was started with show_stop_button=True."""
+    """Stop button -- only shown when the session was started with show_stop_button=True."""
 
     def __init__(self, session: "ETASession"):
         super().__init__(timeout=None)
         self.session = session
 
-    @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, emoji="\u23f9\ufe0f")
+    @discord.ui.button(label="Stop", style=discord.ButtonStyle.danger, emoji="⏹️")
     async def stop_button(
         self,
         interaction: discord.Interaction,
@@ -127,6 +127,21 @@ class ETASession:
             f"{self.origin!r} -> {self.destination!r} ({self.mode})"
         )
 
+        # Swap "Next refresh" to "Refreshing..." while the API call is in flight.
+        if self.message.embeds:
+            pre = self.message.embeds[0]
+            fields = [
+                (f.name, "Refreshing..." if f.name == "Next refresh" else f.value, f.inline)
+                for f in pre.fields
+            ]
+            pre.clear_fields()
+            for name, value, inline in fields:
+                pre.add_field(name=name, value=value, inline=inline)
+            try:
+                await self.message.edit(embed=pre, view=self._make_view())
+            except Exception:
+                pass
+
         try:
             data = await self.cog.fetch_eta(self.origin, self.destination, self.mode)
         except Exception as e:
@@ -159,13 +174,13 @@ class ETASession:
             await self.message.edit(embed=embed, view=view)
         except discord.NotFound:
             self.cog.bot.logger.info(
-                f"{log_prefix} | message deleted — stopping session"
+                f"{log_prefix} | message deleted -- stopping session"
             )
             # Mark stopped directly; no point trying to edit the (deleted) message.
             self._stopped = True
             if self.task and not self.task.done():
                 self.task.cancel()
-            # Remove from persistence — the message is gone for good.
+            # Remove from persistence -- the message is gone for good.
             if self.cog.bot.session_store:
                 await self.cog.bot.session_store.delete(self.message.id)
             if self in self.cog._sessions:
@@ -206,7 +221,7 @@ class ETASession:
         dest_addr = (data.get("destination_addresses") or [self.destination])[0] or self.destination
 
         primary_duration = duration_in_traffic or duration
-        title = f"{primary_duration} — {self.mode.capitalize()}"
+        title = f"{primary_duration} -- {self.mode.capitalize()}"
 
         now = datetime.now(timezone.utc)
         next_refresh = now + timedelta(minutes=self.interval_minutes)
@@ -342,7 +357,7 @@ class ETA(commands.Cog, name="eta"):
     async def cog_unload(self) -> None:
         # persist=True keeps DB rows so sessions are restored on next startup.
         for s in list(self._sessions):
-            await s.stop(reason="Bot restarting — will resume shortly", persist=True)
+            await s.stop(reason="Bot restarting -- will resume shortly", persist=True)
         if self._session and not self._session.closed:
             await self._session.close()
 
@@ -407,7 +422,7 @@ class ETA(commands.Cog, name="eta"):
             return
 
         placeholder = discord.Embed(
-            title="Fetching ETA\u2026",
+            title="Fetching ETA...",
             description=f"From **{from_location}** to **{to_location}** ({mode_value})",
             color=COLOR_PENDING,
         )

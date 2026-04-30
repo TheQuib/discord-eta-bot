@@ -1,7 +1,8 @@
 services:
   discord-eta-bot:
     container_name: discord-eta-bot
-    image: ghcr.io/thequib/discord-eta-bot:latest
+    image: discord-eta-bot:latest
+    #image: ghcr.io/thequib/discord-eta-bot:latest
     env_file:
       - .env
     volumes:
