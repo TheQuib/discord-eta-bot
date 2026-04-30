@@ -11,8 +11,10 @@ on:
       - '.github/workflows/deploy-container.yml'
       - 'docker-compose.yml'
       - 'cogs/**'
+      - 'database/**'
       - bot.py
       - Dockerfile
+      - 'requirements.txt'
       - 'version.txt'
       - 'CHANGELOG.md'
 
