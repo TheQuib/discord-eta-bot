@@ -2,6 +2,7 @@
 ETA cog: /traveltime command that posts a self-updating travel-time embed.
 
 Backed by the Google Maps Distance Matrix API. Set GOOGLE_MAPS_API_KEY in .env.
+Sessions are persisted to SQLite so they survive bot restarts.
 """
 from __future__ import annotations
 
@@ -164,6 +165,11 @@ class ETASession:
             self._stopped = True
             if self.task and not self.task.done():
                 self.task.cancel()
+            # Remove from persistence — the message is gone for good.
+            if self.cog.bot.session_store:
+                await self.cog.bot.session_store.delete(self.message.id)
+            if self in self.cog._sessions:
+                self.cog._sessions.remove(self)
         except discord.HTTPException as e:
             self.cog.bot.logger.warning(f"{log_prefix} | failed to edit message: {e}")
 
@@ -240,12 +246,26 @@ class ETASession:
         except Exception:
             pass
 
-    async def stop(self, reason: str = "Stopped") -> None:
+    async def stop(self, reason: str = "Stopped", *, persist: bool = False) -> None:
+        """Stop this session.
+
+        Args:
+            reason: Footer text shown on the stopped embed.
+            persist: If True, keep the DB row (used during cog_unload so the
+                     session is restored on the next startup).
+        """
         if self._stopped:
             return
         self._stopped = True
         if self.task and not self.task.done():
             self.task.cancel()
+
+        # Remove from persistence unless we want it to survive a restart.
+        if not persist and self.cog.bot.session_store:
+            await self.cog.bot.session_store.delete(self.message.id)
+
+        if self in self.cog._sessions:
+            self.cog._sessions.remove(self)
 
         # Rebuild embed without live fields, then disable the button.
         embed = self.message.embeds[0] if self.message.embeds else discord.Embed(title="Stopped")
@@ -271,10 +291,58 @@ class ETA(commands.Cog, name="eta"):
 
     async def cog_load(self) -> None:
         self._session = aiohttp.ClientSession()
+        await self._restore_sessions()
+
+    async def _restore_sessions(self) -> None:
+        """Re-hydrate any sessions that were running when the bot last shut down."""
+        store = getattr(self.bot, "session_store", None)
+        if store is None:
+            return
+
+        rows = await store.load_all()
+        if not rows:
+            return
+
+        self.bot.logger.info(f"[ETA restore] Restoring {len(rows)} session(s) from DB...")
+        for row in rows:
+            try:
+                channel = (
+                    self.bot.get_channel(row["channel_id"])
+                    or await self.bot.fetch_channel(row["channel_id"])
+                )
+                message = await channel.fetch_message(row["message_id"])
+                requested_by = (
+                    self.bot.get_user(row["requested_by_id"])
+                    or await self.bot.fetch_user(row["requested_by_id"])
+                )
+            except (discord.NotFound, discord.HTTPException, Exception) as e:
+                self.bot.logger.warning(
+                    f"[ETA restore] Dropping session {row['message_id']}: {e}"
+                )
+                await store.delete(row["message_id"])
+                continue
+
+            session = ETASession(
+                cog=self,
+                message=message,
+                origin=row["origin"],
+                destination=row["destination"],
+                mode=row["mode"],
+                interval_minutes=row["interval_minutes"],
+                requested_by=requested_by,
+                show_stop_button=row["show_stop_button"],
+            )
+            self._sessions.append(session)
+            session.start()
+            self.bot.logger.info(
+                f"[ETA restore] Resumed: {row['origin']!r} -> {row['destination']!r} "
+                f"(msg {row['message_id']})"
+            )
 
     async def cog_unload(self) -> None:
+        # persist=True keeps DB rows so sessions are restored on next startup.
         for s in list(self._sessions):
-            await s.stop(reason="Bot reloaded")
+            await s.stop(reason="Bot restarting — will resume shortly", persist=True)
         if self._session and not self._session.closed:
             await self._session.close()
 
@@ -313,8 +381,8 @@ class ETA(commands.Cog, name="eta"):
         description="Post a live ETA between two locations that updates on an interval.",
     )
     @app_commands.describe(
-        from_location="Origin: address, place name, or \'lat,lng\'.",
-        to_location="Destination: address, place name, or \'lat,lng\'.",
+        from_location="Origin: address, place name, or 'lat,lng'.",
+        to_location="Destination: address, place name, or 'lat,lng'.",
         time_to_update="How often to refresh, in minutes (1-30). Default 5.",
         mode="Travel mode. Default: driving.",
         show_stop_button="Add a Stop button to the embed (requires Manage Messages to use).",
@@ -358,6 +426,10 @@ class ETA(commands.Cog, name="eta"):
         )
         self._sessions.append(session)
         session.start()
+
+        # Persist so the session survives a restart.
+        if self.bot.session_store:
+            await self.bot.session_store.save(session)
 
         self.bot.logger.info(
             f"Started /traveltime: {from_location!r} -> {to_location!r} "

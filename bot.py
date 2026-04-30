@@ -3,30 +3,31 @@ import os
 import platform
 import random
 
+import aiosqlite
 import discord
 from discord.ext import commands, tasks
 from discord.ext.commands import Context
 from dotenv import load_dotenv
+
+from database import SessionStore
 
 load_dotenv()
 
 intents = discord.Intents.default()
 intents.message_content = True
 
-# Setup both of the loggers
-
 
 class LoggingFormatter(logging.Formatter):
     # Colors
-    black = "\x1b[30m"
-    red = "\x1b[31m"
-    green = "\x1b[32m"
-    yellow = "\x1b[33m"
-    blue = "\x1b[34m"
-    gray = "\x1b[38m"
+    black = "[30m"
+    red = "[31m"
+    green = "[32m"
+    yellow = "[33m"
+    blue = "[34m"
+    gray = "[38m"
     # Styles
-    reset = "\x1b[0m"
-    bold = "\x1b[1m"
+    reset = "[0m"
+    bold = "[1m"
 
     COLORS = {
         logging.DEBUG: gray + bold,
@@ -73,6 +74,8 @@ class DiscordBot(commands.Bot):
         self.logger = logger
         self.bot_prefix = os.getenv("PREFIX")
         self.invite_link = os.getenv("INVITE_LINK")
+        self.db: aiosqlite.Connection | None = None
+        self.session_store: SessionStore | None = None
 
     async def load_cogs(self) -> None:
         for file in os.listdir(f"{os.path.realpath(os.path.dirname(__file__))}/cogs"):
@@ -82,7 +85,7 @@ class DiscordBot(commands.Bot):
                     await self.load_extension(f"cogs.{extension}")
                     self.logger.info(f"Loaded extension '{extension}'")
                 except Exception as e:
-                    self.logger.error(f"Failed to load extension {extension}\n{type(e).__name__}: {e}")
+                    self.logger.error(f"Failed to load extension {extension} | {type(e).__name__}: {e}")
 
     @tasks.loop(minutes=1.0)
     async def status_task(self) -> None:
@@ -99,8 +102,25 @@ class DiscordBot(commands.Bot):
         self.logger.info(f"Python version: {platform.python_version()}")
         self.logger.info(f"Running on: {platform.system()} {platform.release()} ({os.name})")
         self.logger.info("-------------------")
+
+        # Initialise database.
+        base_dir = os.path.realpath(os.path.dirname(__file__))
+        db_path = os.path.join(base_dir, "database", "bot.db")
+        self.db = await aiosqlite.connect(db_path)
+        await self.db.execute("PRAGMA journal_mode=WAL")
+        schema_path = os.path.join(base_dir, "database", "schema.sql")
+        with open(schema_path) as f:
+            await self.db.executescript(f.read())
+        self.session_store = SessionStore(self.db)
+        self.logger.info("Database ready.")
+
         await self.load_cogs()
         self.status_task.start()
+
+    async def close(self) -> None:
+        if self.db:
+            await self.db.close()
+        await super().close()
 
     async def on_message(self, message: discord.Message) -> None:
         if message.author == self.user or message.author.bot:
@@ -129,9 +149,9 @@ class DiscordBot(commands.Bot):
             embed = discord.Embed(
                 description=(
                     f"**Please slow down** - You can use this command again in "
-                    f"{f'{round(hours)} hours' if round(hours) > 0 else ''} "
-                    f"{f'{round(minutes)} minutes' if round(minutes) > 0 else ''} "
-                    f"{f'{round(seconds)} seconds' if round(seconds) > 0 else ''}."
+                    f"{str(round(hours)) + ' hours' if round(hours) > 0 else ''} "
+                    f"{str(round(minutes)) + ' minutes' if round(minutes) > 0 else ''} "
+                    f"{str(round(seconds)) + ' seconds' if round(seconds) > 0 else ''}."
                 ),
                 color=0xE02B2B,
             )
@@ -179,3 +199,4 @@ class DiscordBot(commands.Bot):
 
 bot = DiscordBot()
 bot.run(os.getenv("TOKEN"))
+getenv("TOKEN"))
